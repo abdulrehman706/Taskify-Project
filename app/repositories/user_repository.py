@@ -1,3 +1,4 @@
+from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.user import User
 
@@ -5,15 +6,24 @@ class UserRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_user(self, user_id: int):
+    def get(self, user_id: int) -> Optional[User]:
         return self.db.query(User).filter(User.id == user_id).first()
 
-    def get_user_by_email(self, email: str):
+    def get_by_email(self, email: str) -> Optional[User]:
         return self.db.query(User).filter(User.email == email).first()
 
-    def create_user(self, username: str, email: str):
-        user = User(username=username, email=email)
+    def list(self, skip: int = 0, limit: int = 100) -> List[User]:
+        return self.db.query(User).offset(skip).limit(limit).all()
+
+    def create(self, email: str, full_name: Optional[str] = None) -> User:
+        user = User(email=email, full_name=full_name)
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def delete(self, user_id: int) -> None:
+        obj = self.get(user_id)
+        if obj:
+            self.db.delete(obj)
+            self.db.commit()

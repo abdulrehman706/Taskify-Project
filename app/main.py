@@ -2,7 +2,8 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, url_for
+from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from authlib.integrations.flask_client import OAuth
@@ -24,13 +25,13 @@ async def read_test():
 # Secret key for JWT
 app.config['SECRET_KEY'] = 'your_secret_key'
 
-# In-memory user storage (for demonstration purposes)
+# In-memory user storage
 users = {}
 
 # Initialize OAuth
 oauth = OAuth(app)
 
-# Configure OAuth2.0 provider (example: Google)
+# Configure OAuth2.0 provider
 app.config['GOOGLE_CLIENT_ID'] = 'your_google_client_id'
 app.config['GOOGLE_CLIENT_SECRET'] = 'your_google_client_secret'
 app.config['GOOGLE_DISCOVERY_URL'] = (
@@ -52,7 +53,7 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get('x-access-token')
         if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
+            return jsonify({'message': 'Token is missing!'}) ,401
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
@@ -60,7 +61,7 @@ def token_required(f):
             if not current_user:
                 raise ValueError('User not found')
         except Exception as e:
-            return jsonify({'message': 'Token is invalid!'}), 401
+            return jsonify({'message': 'Token is invalid!'}) ,401
 
         return f(current_user, *args, **kwargs)
 
@@ -73,12 +74,12 @@ def register():
     password = data.get('password')
 
     if username in users:
-        return jsonify({'message': 'User already exists!'}), 400
+        return jsonify({'message': 'User already exists!'}) ,400
 
     hashed_password = generate_password_hash(password, method='sha256')
     users[username] = {'password': hashed_password}
 
-    return jsonify({'message': 'User registered successfully!'}), 201
+    return jsonify({'message': 'User registered successfully!'}) ,201
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -88,7 +89,7 @@ def login():
 
     user = users.get(username)
     if not user or not check_password_hash(user['password'], password):
-        return jsonify({'message': 'Invalid username or password!'}), 401
+        return jsonify({'message': 'Invalid username or password!'}) ,401
 
     token = jwt.encode({'username': username, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)}, app.config['SECRET_KEY'], algorithm='HS256')
 
@@ -113,7 +114,7 @@ def google_auth():
         if username not in users:
             users[username] = {'email': user_info['email'], 'name': user_info['name']}
         return jsonify({'message': f'Welcome {user_info["name"]}!', 'user': user_info})
-    return jsonify({'message': 'Authentication failed!'}), 401
+    return jsonify({'message': 'Authentication failed!'}) ,401
 
 if __name__ == '__main__':
     app.run(debug=True)

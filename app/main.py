@@ -1,120 +1,188 @@
+from datetime import datetime, timedelta
+from typing import List
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, url_for
-from functools import wraps
-from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
-from authlib.integrations.flask_client import OAuth
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
+from app.database import get_db, create_tables
+from app.repositories.user_repository import UserRepository
+from app.repositories.project_repository import ProjectRepository
+from app.repositories.task_repository import TaskRepository
+from app.schemas.user import UserCreate, UserRead
+from app.schemas.project import ProjectCreate, ProjectRead
+from app.schemas.task import TaskCreate, TaskRead
+
+SECRET_KEY = "supersecret_change_me"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 app = FastAPI()
 
-class Data(BaseModel):
-    name:str
+@app.on_event("startup")
+def on_startup():
+    create_tables()
 
-@app.post("/create/")
-async def create(data: Data):
-    return {"data":data}
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
 
-@app.get("/test/")
-async def read_test():
-    return {"message": "Test endpoint is working!"}
+def create_access_token(subject: str, expires_delta: timedelta = None) -> str:
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode = {"exp": expire, "sub": subject}
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# Secret key for JWT
-app.config['SECRET_KEY'] = 'your_secret_key'
+def create_refresh_token(subject: str) -> str:
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode = {"exp": expire, "sub": subject}
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# In-memory user storage
-users = {}
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    user = UserRepository(db).get_by_email(email)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    return user
 
-# Initialize OAuth
-oauth = OAuth(app)
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    refresh_token: str
 
-# Configure OAuth2.0 provider
-app.config['GOOGLE_CLIENT_ID'] = 'your_google_client_id'
-app.config['GOOGLE_CLIENT_SECRET'] = 'your_google_client_secret'
-app.config['GOOGLE_DISCOVERY_URL'] = (
-    'https://accounts.google.com/.well-known/openid-configuration'
-)
+@app.post("/auth/register", response_model=UserRead, status_code=201)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    repo = UserRepository(db)
+    existing = repo.get_by_email(user.email)
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed = get_password_hash(user.password)
+    created = repo.create(email=user.email, password_hash=hashed, full_name=user.full_name)
+    return created
 
-google = oauth.register(
-    name='google',
-    client_id=app.config['GOOGLE_CLIENT_ID'],
-    client_secret=app.config['GOOGLE_CLIENT_SECRET'],
-    server_metadata_url=app.config['GOOGLE_DISCOVERY_URL'],
-    client_kwargs={
-        'scope': 'openid email profile',
-    },
-)
+@app.post("/auth/login", response_model=TokenResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    repo = UserRepository(db)
+    user = repo.get_by_email(form_data.username)
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    access_token = create_access_token(subject=user.email)
+    refresh_token = create_refresh_token(subject=user.email)
+    return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
 
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('x-access-token')
-        if not token:
-            return jsonify({'message': 'Token is missing!'}) ,401
+@app.get("/users/me", response_model=UserRead)
+def read_users_me(current_user = Depends(get_current_user)):
+    return current_user
 
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            current_user = users.get(data['username'])
-            if not current_user:
-                raise ValueError('User not found')
-        except Exception as e:
-            return jsonify({'message': 'Token is invalid!'}) ,401
+@app.post("/projects/", response_model=ProjectRead)
+def create_project(project: ProjectCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    repo = ProjectRepository(db)
+    with db.begin():
+        created = repo.create(name=project.name, description=project.description, owner_id=current_user.id)
+    return created
 
-        return f(current_user, *args, **kwargs)
+@app.get("/projects/", response_model=List[ProjectRead])
+def list_user_projects(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    repo = ProjectRepository(db)
+    all_projects = repo.list()
+    user_projects = [p for p in all_projects if p.owner_id == current_user.id or current_user in p.members]
+    return user_projects
 
-    return decorated
+class MemberAdd(BaseModel):
+    email: str
 
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+@app.post("/projects/{project_id}/members")
+def add_project_member(project_id: int, payload: MemberAdd, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    project_repo = ProjectRepository(db)
+    user_repo = UserRepository(db)
+    project = project_repo.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404)
+    if project.owner_id != current_user.id:
+        raise HTTPException(status_code=403)
+    member = user_repo.get_by_email(payload.email)
+    if member is None:
+        raise HTTPException(status_code=404)
+    with db.begin():
+        if member not in project.members:
+            project.members.append(member)
+            db.add(project)
+    return {"status": "ok"}
 
-    if username in users:
-        return jsonify({'message': 'User already exists!'}) ,400
+@app.post("/projects/{project_id}/tasks", response_model=TaskRead)
+def create_task(project_id: int, task: TaskCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    project_repo = ProjectRepository(db)
+    task_repo = TaskRepository(db)
+    project = project_repo.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404)
+    if project.owner_id != current_user.id and current_user not in project.members:
+        raise HTTPException(status_code=403)
+    with db.begin():
+        created = task_repo.create(title=task.title, description=task.description, project_id=project_id, assignee_id=task.assignee_id)
+    return created
 
-    hashed_password = generate_password_hash(password, method='sha256')
-    users[username] = {'password': hashed_password}
+@app.get("/projects/{project_id}/tasks", response_model=List[TaskRead])
+def list_project_tasks(project_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    project_repo = ProjectRepository(db)
+    task_repo = TaskRepository(db)
+    project = project_repo.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404)
+    if project.owner_id != current_user.id and current_user not in project.members:
+        raise HTTPException(status_code=403)
+    tasks = [t for t in task_repo.list() if t.project_id == project_id]
+    return tasks
 
-    return jsonify({'message': 'User registered successfully!'}) ,201
+class AssignPayload(BaseModel):
+    assignee_id: int
 
-@app.route('/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+@app.put("/tasks/{task_id}/assign")
+def assign_task(task_id: int, payload: AssignPayload, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    task_repo = TaskRepository(db)
+    project_repo = ProjectRepository(db)
+    task = task_repo.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404)
+    project = project_repo.get(task.project_id)
+    if project.owner_id != current_user.id and current_user not in project.members:
+        raise HTTPException(status_code=403)
+    assignee = UserRepository(db).get(payload.assignee_id)
+    if assignee is None:
+        raise HTTPException(status_code=404)
+    if assignee not in project.members and assignee.id != project.owner_id:
+        raise HTTPException(status_code=400)
+    with db.begin():
+        task.assignee_id = assignee.id
+        db.add(task)
+    return {"status": "ok"}
 
-    user = users.get(username)
-    if not user or not check_password_hash(user['password'], password):
-        return jsonify({'message': 'Invalid username or password!'}) ,401
+class StatusPayload(BaseModel):
+    status: str
 
-    token = jwt.encode({'username': username, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)}, app.config['SECRET_KEY'], algorithm='HS256')
-
-    return jsonify({'token': token})
-
-@app.route('/protected', methods=['GET'])
-@token_required
-def protected_route(current_user):
-    return jsonify({'message': f'Welcome {current_user} to the protected route!'})
-
-@app.route('/login/google')
-def google_login():
-    redirect_uri = url_for('google_auth', _external=True)
-    return google.authorize_redirect(redirect_uri)
-
-@app.route('/auth/google')
-def google_auth():
-    token = google.authorize_access_token()
-    user_info = google.parse_id_token(token)
-    if user_info:
-        username = user_info['email']
-        if username not in users:
-            users[username] = {'email': user_info['email'], 'name': user_info['name']}
-        return jsonify({'message': f'Welcome {user_info["name"]}!', 'user': user_info})
-    return jsonify({'message': 'Authentication failed!'}) ,401
-
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.put("/tasks/{task_id}/status")
+def update_task_status(task_id: int, payload: StatusPayload, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    task_repo = TaskRepository(db)
+    project_repo = ProjectRepository(db)
+    task = task_repo.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404)
+    project = project_repo.get(task.project_id)
+    if project.owner_id != current_user.id and current_user not in project.members and task.assignee_id != current_user.id:
+        raise HTTPException(status_code=403)
+    with db.begin():
+        task.status = payload.status
+        db.add(task)
+    return {"status": "ok"}

@@ -2,6 +2,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.user import User
 
+
 class UserRepository:
     def __init__(self, db: Session):
         self.db = db
@@ -15,8 +16,15 @@ class UserRepository:
     def list(self, skip: int = 0, limit: int = 100) -> List[User]:
         return self.db.query(User).offset(skip).limit(limit).all()
 
-    def create(self, email: str, full_name: Optional[str] = None) -> User:
-        user = User(email=email, full_name=full_name)
+    def create(
+        self,
+        email: str,
+        full_name: Optional[str] = None,
+    ) -> User:
+        user = User(
+            email=email,
+            full_name=full_name,
+        )
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)

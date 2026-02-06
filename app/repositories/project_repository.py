@@ -1,6 +1,9 @@
 from typing import List, Optional
+
 from sqlalchemy.orm import Session
+
 from app.models.project import Project
+
 
 class ProjectRepository:
     def __init__(self, db: Session):

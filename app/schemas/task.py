@@ -1,20 +1,17 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
 
-class TaskCreate(BaseModel):
-    title: str
-    description: Optional[str]
-    project_id: int
-    assignee_id: Optional[int]
+from pydantic import BaseModel
 
-class TaskRead(BaseModel):
-    id: int
+
+class Task(BaseModel):
+    id: Optional[int] = None
     title: str
-    description: Optional[str]
-    project_id: int
-    assignee_id: Optional[int]
-    status: str
-    created_at: Optional[datetime]
+    description: Optional[str] = None
+    project_id: Optional[int] = None
+    assignee_id: Optional[int] = None
+    status: Optional[str] = "open"
+    created_at: Optional[datetime] = None
+
     class Config:
         orm_mode = True

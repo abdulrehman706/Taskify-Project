@@ -7,6 +7,6 @@ user_table = sa.Table(
     "user",
     metadata,
     sa.Column("id", sa.Integer, primary_key=True),
-    sa.Column("name", sa.String)
+    sa.Column("name", sa.String),
 )
 metadata.create_all(engine)
